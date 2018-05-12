@@ -29,14 +29,13 @@ class POPNet(object):
         self.mvn = self._built_net(scope)
         self.tfkids_fit = tf.placeholder(tf.float32, [N_POP, ])
         self.tfkids = tf.placeholder(tf.float32, [N_POP, DNA_SIZE])
-        self.loss = -tf.reduce_mean(self.mvn.log_prob(self.tfkids) * (self.tfkids_fit-self.max_fit) * 1.2 + 0.01 * self.mvn.log_prob(self.tfkids) * self.mvn.prob(self.tfkids))
+        self.loss = -tf.reduce_mean(self.mvn.log_prob(self.tfkids) * (self.tfkids_fit-self.max_fit) + 0.01 * self.mvn.log_prob(self.tfkids) * self.mvn.prob(self.tfkids))
         self.train_op = tf.train.GradientDescentOptimizer(self.LR).minimize(self.loss)
 
   def _built_net(self, scope):
     mean = tf.Variable(tf.truncated_normal([DNA_SIZE, ], stddev=0.02, mean=0.5), dtype=tf.float32, name=scope+'_mean')
-    cov = tf.Variable(0.1 * tf.eye(DNA_SIZE), dtype=tf.float32, name=scope+'_cov')
-    mvn = MultivariateNormalFullCovariance(loc=mean, covariance_matrix=abs(
-      cov + tf.Variable(0.0001 * tf.eye(DNA_SIZE), dtype=tf.float32)), name=scope)
+    cov = tf.Variable(1.0 * tf.eye(DNA_SIZE), dtype=tf.float32, name=scope+'_cov')
+    mvn = MultivariateNormalFullCovariance(loc=mean, covariance_matrix=abs(cov) + tf.Variable(0.01 * tf.eye(DNA_SIZE), dtype=tf.float32), name=scope)
     sess.run(tf.global_variables_initializer())
     return mvn
 
@@ -100,7 +99,7 @@ class Worker(object):
       for kid in kids:
         feature_list = []
         for feature in kid:
-          if feature > 0.5:
+          if feature > 0.500001:
             feature_list.append(1)
           else:
             feature_list.append(0)
@@ -121,42 +120,67 @@ class Worker(object):
       self.popnet._run_net(self.LR, self.kids_fit, kids, max_fit)
       new_max, count = self.get_max(self.kids_fit)
       feature_get = self.feature_set[count]
-      lock_max_fit.acquire()
-      max_fit = pop._get_fit()
-      lock_max_fit.release()
-      if (new_max > max_fit):
-        lock_max_fit.acquire()
-        pop._set_fit(new_max)
-        lock_max_fit.release()
-        dr = self.dr_pre(feature_get)
-        lock_dr.acquire()
-        pop._set_dr(dr)
-        lock_dr.release()
-        print('   ', self.name, '使用', SKL, '第', g + 1, '轮迭代：')
+      new_dr = self.dr_pre(feature_get)
+      changed = self.insert_value(new_max, new_dr, 0.2)
+      if changed is True:
+        print('   ', self.name, '使用', SKL, K_NN_type, '第', g + 1, '轮迭代：')
         print('选取特征为：', feature_get)
-        print('维度缩减为：', dr)
+        print('维度缩减为：', new_dr)
         print('准确率为：', new_max)
         print(self.kids_fit)
         self.popnet._update_net()
-      elif (new_max == max_fit):
-        new_dr = self.dr_pre(feature_get)
-        lock_dr.acquire()
-        dr = pop._get_dr()
-        lock_dr.release()
-        if (new_dr > dr):
-          lock_dr.acquire()
-          pop._set_dr(new_dr)
-          lock_dr.release()
-          print('   ', self.name, '使用', SKL, '第', g + 1, '轮迭代：')
-          print('选取特征为：', feature_get)
-          print('维度缩减为：', new_dr)
-          print('准确率为：', new_max)
-          print(self.kids_fit)
-          self.popnet._update_net()
-    if (g % 10 ==0):
+      # lock_max_fit.acquire()
+      # max_fit = pop._get_fit()
+      # lock_max_fit.release()
+      # if (new_max > max_fit):
+      #   lock_max_fit.acquire()
+      #   pop._set_fit(new_max)
+      #   lock_max_fit.release()
+      #   dr = self.dr_pre(feature_get)
+      #   lock_dr.acquire()
+      #   pop._set_dr(dr)
+      #   lock_dr.release()
+      #   print('   ', self.name, '使用', SKL, '第', g + 1, '轮迭代：')
+      #   print('选取特征为：', feature_get)
+      #   print('维度缩减为：', dr)
+      #   print('准确率为：', new_max)
+      #   print(self.kids_fit)
+      #   self.popnet._update_net()
+      # elif (new_max == max_fit):
+      #   new_dr = self.dr_pre(feature_get)
+      #   lock_dr.acquire()
+      #   dr = pop._get_dr()
+      #   lock_dr.release()
+      #   if (new_dr > dr):
+      #     lock_dr.acquire()
+      #     pop._set_dr(new_dr)
+      #     lock_dr.release()
+      #     print('   ', self.name, '使用', SKL, '第', g + 1, '轮迭代：')
+      #     print('选取特征为：', feature_get)
+      #     print('维度缩减为：', new_dr)
+      #     print('准确率为：', new_max)
+      #     print(self.kids_fit)
+      #     self.popnet._update_net()
+    if (g % 5 ==0):
       self.popnet.pull()
 
-
+  def insert_value(self, new_max, new_dr, bili):
+    lock_max_fit.acquire()
+    max_fit = pop._get_fit()
+    lock_max_fit.release()
+    lock_dr.acquire()
+    dr = pop._get_dr()
+    lock_dr.release()
+    if (max_fit * bili + dr * 100 * (1 - bili)) < (new_max * bili + new_dr * 100 * (1 - bili)):
+      lock_max_fit.acquire()
+      pop._set_fit(new_max)
+      lock_max_fit.release()
+      lock_dr.acquire()
+      pop._set_dr(new_dr)
+      lock_dr.release()
+      return True
+    else:
+      return False
 
   def numtofea(self, num, fea_list):
     feature = []
@@ -264,11 +288,11 @@ def loadData_split(filename, type, k_nn, skl):
         return x_train, x_test, y_train, y_test
 
 if __name__ == '__main__':
-  N_POP = 2  #种群大小，可改变，根据数据集大小动态设定
+  N_POP = 20  #种群大小，可改变，根据数据集大小动态设定
   LEARNING_RATE = 0.02   #学习率，可以改变，初始为0.02
-  MAX_GLOBAL_EP = 20    #迭代次数，可改变
+  MAX_GLOBAL_EP = 300    #迭代次数，可改变
   sess = tf.Session()
-  train_X, predict_X, train_y, predict_y = loadData_split('E:/Sonar.txt', 3, 1, 1)
+  train_X, predict_X, train_y, predict_y = loadData_split('E:/arcene.txt', 3, 1, 1)
   trainX = np.array(train_X)
   predictX = np.array(predict_X)
   trainy = np.array(train_y)
