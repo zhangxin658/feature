@@ -4,10 +4,13 @@ from numpy import *#mat
 import threading
 from sklearn import neighbors
 from sklearn import svm
+from sklearn import tree
 from sklearn.tree import DecisionTreeClassifier
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import StratifiedKFold
 from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold
 import tensorflow as tf
 from tensorflow.contrib.distributions import MultivariateNormalFullCovariance
 
@@ -19,7 +22,7 @@ class POPNet(object):
       self.max_fit = 0
       self.dr = 0
       with tf.variable_scope(scope):
-        self.mean_params, self.cov_params, self.mvn = self._built_net(scope)
+        self.mvn = self._built_net(scope)
         self.tfkids_fit = tf.placeholder(tf.float32, [N_POP, ])
         self.tfkids = tf.placeholder(tf.float32, [N_POP, DNA_SIZE])
         self.loss = -tf.reduce_mean(self.mvn.log_prob(self.tfkids) * (self.tfkids_fit-self.max_fit) + 0.01 * self.mvn.log_prob(self.tfkids) * self.mvn.prob(self.tfkids))
@@ -27,22 +30,18 @@ class POPNet(object):
       with tf.variable_scope(scope):
         self.LR = 0
         self.max_fit = 0
-        self.mean_params, self.cov_params, self.mvn = self._built_net(scope)
+        self.mvn = self._built_net(scope)
         self.tfkids_fit = tf.placeholder(tf.float32, [N_POP, ])
         self.tfkids = tf.placeholder(tf.float32, [N_POP, DNA_SIZE])
-        self.loss = -tf.reduce_mean(self.mvn.log_prob(self.tfkids) * (self.tfkids_fit-self.max_fit) * 1.2 + 0.1 * self.mvn.log_prob(self.tfkids) * self.mvn.prob(self.tfkids))
-        self.train_op = tf.train.GradientDescentOptimizer(self.LR).minimize(self.loss)
+        self.loss = -tf.reduce_mean(self.mvn.log_prob(self.tfkids) * (self.tfkids_fit-self.max_fit) * 1.2 + 0.01 * self.mvn.log_prob(self.tfkids) * self.mvn.prob(self.tfkids))
+        self.train_op = tf.train(self.LR).minimize(self.loss)
 
   def _built_net(self, scope):
-    with tf.variable_scope('mean'):
-      mean = tf.Variable(tf.truncated_normal([DNA_SIZE, ], stddev=0.02, mean=0.5), dtype=tf.float32, name=scope+'_mean')
-    with tf.variable_scope('cov'):
-      cov = tf.Variable(1.0 * tf.eye(DNA_SIZE), dtype=tf.float32, name=scope+'_cov')
+    mean = tf.Variable(tf.truncated_normal([DNA_SIZE, ], stddev=0.02, mean=0.5), dtype=tf.float32, name=scope+'_mean')
+    cov = tf.Variable(1.0 * tf.eye(DNA_SIZE), dtype=tf.float32, name=scope+'_cov')
     mvn = MultivariateNormalFullCovariance(loc=mean, covariance_matrix=abs(cov + tf.Variable(0.00001 * tf.eye(DNA_SIZE), dtype=tf.float32)), name=scope)
-    mean_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope + '/mean')
-    cov_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope + '/cov')
     sess.run(tf.global_variables_initializer())
-    return mean_params, cov_params, mvn
+    return mvn
 
   def _run_net(self, LR, kids_fit, kids):
     # self.train_op = tf.train.GradientDescentOptimizer(LR).minimize(self.loss)  # compute and apply gradients for mean and cov
@@ -55,18 +54,12 @@ class POPNet(object):
 
   def _update_net(self):
     lock_update.acquire()
-    # self.push_mean_params_op = [l_p.assign(g_p) for l_p, g_p in zip(pop.mean_params, self.mean_params)]
-    # self.push_cov_params_op = [g_p.assign(g_p) for g_p, l_p in zip(pop.cov_params, self.cov_params)]
-    # sess.run([self.push_mean_params_op, self.push_cov_params_op])
-    import copy
-    pop.mvn = copy.deepcopy(self.mvn)
+    pop.mvn = self.mvn.copy()
     lock_update.release()
 
   def _pull_net(self):
     lock_pull.acquire()
-    self.pull_mean_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.mean_params, pop.mean_params)]
-    self.pull_cov_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.cov_params, pop.cov_params)]
-    sess.run([self.pull_mean_params_op, self.pull_cov_params_op])
+    self.mvn = pop.mvn.copy()
     lock_pull.release()
 
   def _get_net(self):
@@ -99,16 +92,11 @@ class Worker(object):
     self.name = name
     self.popnet = POPNet(name, pop)
     self.LR = LEARNING_RATE
-    self.uplock = threading.Lock()
-    self.pulllock = threading.Lock()
     # self.feature_set = []  #所有孩子特征的集合
 
   def work(self):
     for g in range(MAX_GLOBAL_EP):
-      # if (g % 10 == 0 and g != 0):
-      #   self.popnet._pull_net()
-      print(self.name, g+1)
-      print(sess.run(self.popnet.mvn.mean()))
+      print(self.name, g)
       if g % 100 == 0:
         lock_max_fit.acquire()
         max_fit = pop._get_fit()
@@ -131,28 +119,42 @@ class Worker(object):
         self.feature_set.append(feature_list)       #将每个子代所选取的特征放到特征集合中
         # print('===========================输出选取的特征==============================')
         # print(feature_Select)
-        data_sample = self.read_data_fea(feature_Select, trainX)
-        data_predict = self.read_data_fea(feature_Select, predictX)    #找到所选特征所对应的数据集
-        # print('===========================输出训练集和预测集============================')
-        # print(data_sample)
-        # print(data_predict)
-        kid_fit = self.get_fitness(data_sample, trainy, data_predict, predicty, SKL)   #然后更具所选的特征集合进行准确率求解
-        self.kids_fit.append(kid_fit)     #然后将每一的子代的适应度添加到适应度的集合当中
-      # lock_max_fit.acquire()
+        if(loadtype == 1):
+          data_sample = self.read_data_fea(feature_Select, trainX)
+          data_predict = self.read_data_fea(feature_Select, predictX)    #找到所选特征所对应的数据集
+          # print('===========================输出训练集和预测集============================')
+          # print(data_sample)
+          # print(data_predict)
+          kid_fit = self.get_fitness(data_sample, trainy, data_predict, predicty, SKL)   #然后更具所选的特征集合进行准确率求解
+          self.kids_fit.append(kid_fit)     #然后将每一的子代的适应度添加到适应度的集合当中
+        else:
+          kid_fit = 0.0
+          for train_index, test_index in skf.split(datafeature, label):
+            trainX, predictX = datafeature[train_index], datafeature[test_index]
+            trainy, predicty = label[train_index], label[test_index]
+            data_sample = self.read_data_fea(feature_Select, trainX)
+            data_predict = self.read_data_fea(feature_Select, predictX)  # 找到所选特征所对应的数据集
+            kid_fit_sample = self.get_fitness(data_sample, trainy, data_predict, predicty, SKL)
+            kid_fit = kid_fit + kid_fit_sample
+          kid_fit = kid_fit/nfold
+          self.kids_fit.append(kid_fit)  # 然后将每一的子代的适应度添加到适应度的集合当中
+            # lock_max_fit.acquire()
       # max_fit = pop._get_fit()
       # lock_max_fit.release()
       self.popnet._run_net(self.LR, self.kids_fit, kids)    #然后根据所有子代的适应度来进行参数更新
       new_max, count = self.get_max(self.kids_fit)  #找到子代中准确率最高的孩子，以及返回孩子的位置
       feature_get = self.feature_set[count]      #根据找到的位置找到相应的特征选取
       new_dr = self.dr_pre(feature_get)        #然后更具特征选取来求出所对应的维度缩减率
-      changed = self.insert_value(new_max, new_dr, 1)      #将新得到的值一目前最大值进行比较
+      changed = self.insert_value(new_max, new_dr, 0.5)      #将新得到的值一目前最大值进行比较
       if changed is True:
-        print('   ', self.name, '使用', ctype, '第', g+1, '轮迭代：')
+        print('   ', self.name, '使用', SKL, K_NN_type, '第', g + 1, '轮迭代：')
         print('选取特征为：', feature_get)
         print('维度缩减为：', new_dr)
         print('准确率为：', new_max)
         print(self.kids_fit)
         # self.popnet._update_net()
+    # if (g % 15 ==0):
+    #   self.popnet._pull_net()
 
   def insert_value(self, new_max, new_dr, bili):
     lock_max_fit.acquire()
@@ -218,8 +220,8 @@ class Worker(object):
         #     num += 1
         # acc = (1 - num / len(label_train))
     elif train_cla is 'tree':
-      clf = DecisionTreeClassifier()
-      if len(data_train[0]) > 0:
+      if (len(data_train[0]) > 0):
+        clf = DecisionTreeClassifier()
         clf.fit(data_train, label_train)
         predict = clf.predict(data_pre)
         acc = self.acc_pre(predict, label_pre)
@@ -257,17 +259,13 @@ class Worker(object):
 def loadData_split(filename, type, k_nn, skl):
     global K_NN_type
     global SKL
-    global ctype
     K_NN_type = k_nn
     if (skl == 1):
         SKL = 'train_knn'
-        ctype = '%s, %s' %(SKL, K_NN_type)
     elif (skl == 2):
         SKL = 'svm'
-        ctype = SKL
     elif skl == 3:
-      SKL = 'tree'
-      ctype = SKL
+        SKL = 'tree'
     # 数据由空格分离，标签在最后一列
     if (type == 1):
         data = pd.read_table(filename, sep=' ')
@@ -292,6 +290,83 @@ def loadData_split(filename, type, k_nn, skl):
         x, y = data.ix[:, 1:], data.ix[:, 0]
         x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.3)
         return x_train, x_test, y_train, y_test
+
+'''
+这里是完成nfold的操作
+'''
+def loadData_nfold(filename, type, k_nn, skl, N_S):
+  global K_NN_type
+  global SKL
+  K_NN_type = k_nn
+  if (skl == 1):
+    SKL = 'train_knn'
+  elif (skl == 2):
+    SKL = 'svm'
+  elif skl == 3:
+    SKL = 'tree'
+  # 数据由空格分离，标签在最后一列
+  if (type == 1):  #空格最后扁
+    numFeat = len(open(filename).readline().split(' ')) - 1
+    feature = []
+    label = []
+    fr = open(filename)
+    for line in fr.readlines():
+      xi = []
+      curline = line.strip().split(' ')
+      for i in range(numFeat):
+        xi.append(float(curline[i]))
+      feature.append(xi)
+      label.append((curline[-1]))
+    skf = KFold(n_splits=N_S)
+    skf.get_n_splits(feature, label)
+    return skf, feature, label
+  elif type == 2:   #逗号最后便
+    numFeat = len(open(filename).readline().split(',')) - 1
+    feature = []
+    label = []
+    fr = open(filename)
+    for line in fr.readlines():
+      xi = []
+      curline = line.strip().split(',')
+      for i in range(numFeat):
+        xi.append(float(curline[i]))
+      feature.append(xi)
+      label.append((curline[-1]))
+    skf = KFold(n_splits=N_S)
+    skf.get_n_splits(feature, label)
+    return skf, feature, label
+  elif type == 3:   #空格最前边
+    numFeat = len(open(filename).readline().split(' '))
+    # print(numFeat)
+    feature = []
+    label = []
+    fr = open(filename)
+    for line in fr.readlines():
+      xi = []
+      curline = line.strip().split(' ')
+      label.append(float(curline[0]))
+      for i in range(1, numFeat):
+        xi.append(float(curline[i]))
+      feature.append(xi)
+      skf = KFold(n_splits=N_S)
+      skf.get_n_splits(feature, label)
+    return skf, feature, label
+  elif type == 4:    #逗号，最前边
+    numFeat = len(open(filename).readline().split(','))
+    # print(numFeat)
+    feature = []
+    label = []
+    fr = open(filename)
+    for line in fr.readlines():
+      xi = []
+      curline = line.strip().split(',')
+      label.append(float(curline[0]))
+      for i in range(1, numFeat):
+        xi.append(float(curline[i]))
+      feature.append(xi)
+      skf = KFold(n_splits=N_S)
+      skf.get_n_splits(feature, label)
+    return skf, feature, label
 
 def saveData1(filename, dataname):
   with open(filename, 'w') as file_object:  # 将文件及其内容存储到变量file_object
@@ -323,27 +398,48 @@ if __name__ == '__main__':
   LEARNING_RATE = 0.01   #学习率，可以改变，初始为0.02
   MAX_GLOBAL_EP = 1000    #迭代次数，可改变
   sess = tf.Session()
-  train_X, predict_X, train_y, predict_y = loadData_split('E:/Vehicle.txt', 1, 5, 1)
-  trainX = np.array(train_X)
-  predictX = np.array(predict_X)
-  trainy = np.array(train_y)
-  predicty = np.array(predict_y)
+  loadtype = 1  #读取文件的方式1：表示通过数据集进行划分；2表示使用nfold划分
+  sky = 0
+  nfold = 10
+  num_fea_original = 0
   lock_thread = threading.Lock()
   lock_max_fit = threading.Lock()
   lock_update = threading.Lock()
   lock_pull = threading.Lock()
   lock_dr = threading.Lock()
-  DNA_SIZE = len(trainX[0])
-  print('============================输出数据集============================')
-  saveData1('E:/trainX.txt', trainX)
-  saveData1('E:/predictX.txt', predictX)
-  saveData2('E:/trainy.txt', trainy)
-  saveData2('E:/predicty.txt', predicty)
-  print(trainX, predictX, trainy, predicty)
+  trainX = []
+  predictX = []
+  trainy = []
+  predicty = []
+  if(loadtype == 1):
+    train_X, predict_X, train_y, predict_y = loadData_split('E:/arcene.txt', 3, 1, 3)
+    trainX = np.array(train_X)
+    predictX = np.array(predict_X)
+    trainy = np.array(train_y)
+    predicty = np.array(predict_y)
+    DNA_SIZE = len(trainX[0])
+    print('============================输出数据集============================')
+    saveData1('E:/trainX.txt', trainX)
+    saveData1('E:/predictX.txt', predictX)
+    saveData2('E:/trainy.txt', trainy)
+    saveData2('E:/predicty.txt', predicty)
+    print(trainX, predictX, trainy, predicty)
+    num_fea_original = mat(trainX).shape[1]
+  elif(loadtype == 2):
+    skf, datafeature, label = loadData_nfold('E:/Sonar.txt', 2, 1, 3, nfold)
+    datafeature = np.array(datafeature)
+    label = np.array(label)
+    num_fea_original = len(datafeature[0])
+    DNA_SIZE = len(datafeature[0])
+    # for train_index, test_index in skf.split(datafeature, label):
+    #   print("Train Index:", train_index, ",Test Index:", test_index)
+    #   X_train, X_test = datafeature[train_index], datafeature[test_index]
+    #   y_train, y_test = label[train_index], label[test_index]
+    #   print(X_train, X_test, y_train, y_test)
+
   pop = POPNet(GLOBAL_NET_SCOPE)
   # print('============================输出子代==============================')
   # print(pop._get_kids(lock))
-  num_fea_original = mat(trainX).shape[1]
   Feature = []
   for i in range(num_fea_original):
     Feature.append(i)  # 其中的元素是特征所在的位置

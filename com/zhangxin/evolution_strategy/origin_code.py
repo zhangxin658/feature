@@ -1,3 +1,4 @@
+from numpy import *#mat
 from sklearn import neighbors
 from sklearn import svm
 from sklearn import tree
@@ -38,30 +39,6 @@ def loadData_tail(filename):
         label.append((curline[-1]))
     return feature,label
 
-def saveData1(filename, dataname):
-    with open(filename, 'w') as file_object:  # 将文件及其内容存储到变量file_object
-
-    # 写入第一行(第一块)
-        file_object.write(str(dataname[0, 0]))  # 写第一行第一列
-        for j in range(1, np.size(dataname, 1)):
-            file_object.write(' ' + str(dataname[0, j]))  # 写第一列后面的列
-
-            # 写入第一行后面的行（第二块）
-        for i in range(1, np.size(dataname, 0)):
-            file_object.write('\n' + str(dataname[i, 0]))
-            for j in range(1, np.size(dataname, 1)):
-                file_object.write(' ' + str(dataname[i, j]))
-
-def saveData2(filename, dataname):
-    with open(filename, 'w') as file_object:  # 将文件及其内容存储到变量file_object
-
-        # 写入第一行(第一块)
-        file_object.write(str(dataname[0]))  # 写第一行第一列
-
-        # 写入第一行后面的行（第二块）
-        for i in range(1, np.size(dataname, 0)):
-            file_object.write('\n' + str(dataname[i]))
-
 def loadData_split(filename, type, k_nn, skl):
     global K_NN_type
     global SKL
@@ -97,29 +74,23 @@ def loadData_split(filename, type, k_nn, skl):
 
 K_NN_type = 0
 SKL = 'none'
-train_X, predict_X, train_y, predict_y = loadData_split('E:/dataset/muse1.txt', 2, 5, 1)
+train_X, predict_X, train_y, predict_y = loadData_split('E:/Sonar.txt', 3, 1, 1)
 trainX = np.array(train_X)
 predictX = np.array(predict_X)
 trainy = np.array(train_y)
 predicty = np.array(predict_y)
-saveData1('E:/dataset/trainX.txt', trainX)
-saveData1('E:/dataset/predictX.txt', predictX)
-saveData2('E:/dataset/trainy.txt', trainy)
-saveData2('E:/dataset/predicty.txt', predicty)
 print(trainX, predictX, trainy, predicty)
 
 
-num_fea_original=np.mat(trainX).shape[1]
+num_fea_original=mat(trainX).shape[1]
 feature=[]
 
 for i in range(num_fea_original):
     feature.append(i)
 
 #===========================================相关工具方法=============================
-
-
 def read_data_fea(fea_list, dataset):
-    dataMat = np.mat(dataset)
+    dataMat = mat(dataset)
     col = dataMat.shape[0]#行号
     data_sample = []
     for i in range(col):
@@ -185,42 +156,28 @@ def dr_pre(feature_list):
 def get_max(new_list):
     max = 0
     count = 0
-    index = 0
     for i in new_list:
         count  = count + 1
         if(i > max):
             max = i
-            index = count
-    return max, index - 1
-
-def insert_value(new_max, new_dr, bili):
-    global max, dr
-    if (max * bili + dr * 100 * (1 - bili)) < (new_max * bili + new_dr * 100 * (1 - bili)):
-        max = new_max
-        dr = new_dr
-        return True
-    else:
-        return False
+    return max, count - 1
 #===================================初始化参数====================================
 
 DNA_SIZE = len(trainX[0])         # parameter (solution) number
-N_POP = 5           # population size
+N_POP = 50           # population size
 N_GENERATION = 1000   # training step
-LR = 0.001
+LR = 0.02
 
 #==========================build multivariate distribution
-mean = tf.Variable(tf.truncated_normal([DNA_SIZE, ], mean=0.0, stddev=0.1), dtype=tf.float32)
-cov = tf.Variable(1.0 * tf.eye(DNA_SIZE), dtype=tf.float32)
-# mvn = MultivariateNormalFullCovariance(loc=mean, covariance_matrix=tf.Variable(1.0 * tf.eye(DNA_SIZE), dtype=tf.float32))
-mvn = MultivariateNormalFullCovariance(loc=mean, covariance_matrix=abs(cov))
-# mvn = MultivariateNormalFullCovariance(loc=mean, covariance_matrix=abs(cov + tf.Variable(0.05 * tf.eye(DNA_SIZE), dtype=tf.float32)))
+mean = tf.Variable(tf.truncated_normal([DNA_SIZE, ], stddev=0.02, mean=0.5), dtype=tf.float32)
+cov = tf.Variable(tf.eye(DNA_SIZE), dtype=tf.float32)
+mvn = MultivariateNormalFullCovariance(loc=mean, covariance_matrix=abs(cov + tf.Variable(0.001 * tf.eye(DNA_SIZE), dtype=tf.float32)))
 make_kid = mvn.sample(N_POP)
 
 #==========================compute gradient and update mean and covariance matrix from sample and fitness
 tfkids_fit = tf.placeholder(tf.float32, [N_POP, ])
 tfkids = tf.placeholder(tf.float32, [N_POP, DNA_SIZE])
-loss = -tf.reduce_mean(mvn.log_prob(tfkids) * tfkids_fit)
-# loss = -tf.reduce_mean(mvn.log_prob(tfkids) * tfkids_fit + 0.001 * mvn.log_prob(tfkids) * mvn.prob(tfkids))         # log prob * fitness
+loss = -tf.reduce_mean(mvn.log_prob(tfkids)*tfkids_fit + 0.01 * mvn.log_prob(tfkids) * mvn.prob(tfkids))         # log prob * fitness
 # print(0.01 * mvn.log_prob(tfkids) * mvn.prob(tfkids))
 train_op = tf.train.GradientDescentOptimizer(LR).minimize(loss) # compute and apply gradients for mean and cov
 
@@ -230,22 +187,16 @@ sess.run(tf.global_variables_initializer())
 max = 0
 dr = 0
 for g in range(N_GENERATION):
-    print('g:', g+1, 'max:', max, 'dr:', dr)
-    # if g % 10 == 0:
-    #     LR = LR * pow(0.99, g / 10)
-    #     print(g+1, 'LR', LR)
-    # print('mean: ', sess.run(mvn.mean()))
-    # print('cov: ', sess.run(mvn.covariance()))
+    if N_GENERATION % 10 == 0:
+        LR = LR * 0.9
     kids = sess.run(make_kid)
-    # print(g+1, 'kids:', kids)
-    kids_fit = []   # 放的是减去最大值之后的适应度值
-    kids_fits = []   # 放的是没有家去最大值是的子代的适应度值
-    feature_set = []   # 放的是每一代多有孩子所选取的特征
-    for kid in kids:
-        feature_list = []   #对于每一个孩子
+    kids_fit = []
+    feature_set = []
+    for i in kids:
+        feature_list = []
         k = 0
-        for j in kid:    #对于每个孩子的每一个特征
-            if j > 0.0:
+        for j in i:
+            if j > 0.5:
                 feature_list.append(1)
             else:
                 feature_list.append(0)
@@ -253,37 +204,26 @@ for g in range(N_GENERATION):
         feature_set.append(feature_list)
         data_sample = read_data_fea(fea_list_CB, trainX)
         data_predict = read_data_fea(fea_list_CB, predictX)
-        kid_fit = get_fitness(data_sample, trainy, data_predict, predicty, SKL) * 100
-        kid_tifs = kid_fit - max
-        kids_fit.append(kid_tifs)
-        kids_fits.append(kid_fit)
-    sess.run(train_op, {tfkids_fit: kids_fits, tfkids: kids})  # update distribution parameters
-    new_max, count = get_max(kids_fits)
+        kid_fit = get_fitness(data_sample, trainy, data_predict, predicty, SKL) * 100 - max
+        kids_fit.append(kid_fit)
+    sess.run(train_op, {tfkids_fit: kids_fit, tfkids: kids})  # update distribution parameters
+    new_max, count = get_max(kids_fit)
+    new_max = new_max + max
     feature_get = feature_set[count]
-    new_dr = dr_pre(feature_get)
-    changed = insert_value(new_max, new_dr, 1)  # 将新得到的值与目前最大值进行比较
-    if changed is True:
-        print('   使用', SKL, K_NN_type, '第', g + 1, '轮迭代：')
+    if(new_max > max):
+        max = new_max
+        dr = dr_pre(feature_get)
+        print('   使用', SKL, '第', g+1, '轮迭代：')
         print('选取特征为：', feature_get)
-        print('维度缩减为：', new_dr)
-        print('准确率为：', new_max)
-        print(kids_fits)
-    if g % 999 == 0 and g != 0:
-        print('选取特征为：', feature_get)
-    # if(new_max > max):
-    #     max = new_max
-    #     dr = dr_pre(feature_get)
-    #     print('   使用', SKL, '第', g+1, '轮迭代：')
-    #     print('选取特征为：', feature_get)
-    #     print('维度缩减为：', dr)
-    #     print('准确率为：', max)
-    #     print(kids_fits)
-    # elif(new_max == max):
-    #     new_dr = dr_pre(feature_get)
-    #     if(new_dr > dr):
-    #         dr = new_dr
-    #         print('   使用', SKL,  '第', g+1, '轮迭代：')
-    #         print('选取特征为：', feature_get)
-    #         print('维度缩减为：', dr)
-    #         print('准确率为：', max)
-    #         print(kids_fits)
+        print('维度缩减为：', dr)
+        print('准确率为：', max)
+        print(kids_fit)
+    elif(new_max == max):
+        new_dr = dr_pre(feature_get)
+        if(new_dr > dr):
+            dr = new_dr
+            print('   使用', SKL,  '第', g+1, '轮迭代：')
+            print('选取特征为：', feature_get)
+            print('维度缩减为：', dr)
+            print('准确率为：', max)
+            print(kids_fit)
