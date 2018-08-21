@@ -5,6 +5,8 @@
 import tensorflow as tf
 import multiprocessing
 import threading
+import math
+import random
 from tensorflow.contrib.distributions import MultivariateNormalFullCovariance
 import pandas as pd
 import numpy as np
@@ -34,9 +36,11 @@ class Global_pop(object):
             self.DNA_size = data.DNA_size
             self.max_fit = 0.0
             self.dr = 0.0
+            self.pop_list = []
+            self.fit_val = 100.0
             self.workPop = tf.Variable(0)
             with tf.variable_scope('mean'):
-                self.mean = tf.Variable(tf.truncated_normal([self.DNA_size, ], stddev=0.02, mean=0.5), dtype=tf.float32,
+                self.mean = tf.Variable(tf.truncated_normal([self.DNA_size, ], stddev=0.01, mean=0.5), dtype=tf.float32,
                                         name=name + '_mean')
             with tf.variable_scope('cov'):
                 self.cov = tf.Variable(1.0 * tf.eye(self.DNA_size), dtype=tf.float32, name=name + '_cov')
@@ -56,17 +60,48 @@ class Global_pop(object):
     def setDr(self, dr):
         self.dr = dr
 
+    def setFit_val(self, fit, name, g):
+        lock_global1.acquire()
+        if g == 0:
+            val = []
+            val.append(name)
+            val.append(fit)
+            self.pop_list.append(val)
+        else:
+            for i in self.pop_list:
+                if name == i[0]:
+                    i[1] = fit
+        lock_global1.release()
+
+    def is_choose(self, name):
+        i_name = ''
+        i_fit = 100.0
+        is_choose = False
+        lock_global2.acquire()
+        for i in self.pop_list:
+            if i[1] < i_fit:
+                i_name = i[0]
+                i_fit = i[1]
+        lock_global2.release()
+        if i_name == name:
+            is_choose = True
+        return is_choose
+
+    def getPop_list(self):
+        return self.pop_list
 '''
 然后就是创建每个子线程的网络
 '''
 
 
 class Worker_pop(object):
-    def __init__(self, name, data):
+    def __init__(self, name, data, global_pop, bili):
         with tf.variable_scope(name):
             self.name = name
             self.max_fit = 0.0
+            self.fit_val = 0.0
             self.dr = 0.0
+            self.bili = bili
             self.DNA_size = data.getDNA_size()
             # self.mean_params, self.cov_params, self.mean, self.cov = self._creat_net(name, data.getDNA_size())
             with tf.variable_scope('mean'):
@@ -88,32 +123,62 @@ class Worker_pop(object):
             #     self.loss)  # compute and apply gradients for mean and cov
             self.mean_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=name + '/mean')
             self.cov_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=name + '/cov')
+            with tf.name_scope('pull'):
+                self.pull_mean_op = self.mean.assign(global_pop.mean)
+                self.pull_cov_op = self.cov.assign(global_pop.cov)
+                # self.pull_mean_params_op = [l_p.assign(g_p) for l_p, g_p in
+                #                             zip(self.mean_params, global_pop.mean_params)]
+                # self.pull_cov_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.cov_params, global_pop.cov_params)]
+            with tf.name_scope('push'):
+                self.push_mean_op = global_pop.mean.assign(self.mean)
+                self.push_cov_op = global_pop.cov.assign(self.cov)
+                # self.push_mean_params_op = [g_p.assign(l_p) for g_p, l_p in
+                #                             zip(global_pop.mean_params, self.mean_params)]
+                # self.push_cov_params_op = [g_p.assign(l_p) for g_p, l_p in zip(global_pop.cov_params, self.cov_params)]
+
 
     def _update_net(self):
-        lock_push.acquire()
-        self.push_mean_params_op = [g_p.assign(l_p) for g_p, l_p in zip(global_pop.mean_params, self.mean_params)]
-        self.push_cov_params_op = [g_p.assign(l_p) for g_p, l_p in zip(global_pop.cov_params, self.cov_params)]
-        sess.run([self.push_mean_params_op, self.push_cov_params_op])
+        sess.run([self.push_mean_op, self.push_cov_op])
+        # lock_push.acquire()
+        # self.push_mean_params_op = [g_p.assign(l_p) for g_p, l_p in zip(global_pop.mean_params, self.mean_params)]
+        # self.push_cov_params_op = [g_p.assign(l_p) for g_p, l_p in zip(global_pop.cov_params, self.cov_params)]
+        # sess.run([self.push_mean_params_op, self.push_cov_params_op])
         # self.update_mean = self.train_op.apply_gradients(zip(self.mean_grads, global_pop.mean_params))
         # self.update_cov = self.train_op.apply_gradients(zip(self.cov_grads, global_pop.cov_params))
         # sess.run([self.update_mean, self.update_cov])  # local grads applies to global net
-        print('push ==========================================', 'zhangxin')
-        lock_push.release()
+        # lock_push.release()
 
     def _pull_net(self):
-        lock_pull.acquire()
-        self.pull_mean_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.mean_params, global_pop.mean_params)]
-        self.pull_cov_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.cov_params, global_pop.cov_params)]
-        sess.run([self.pull_mean_params_op, self.pull_cov_params_op])
-        print('pull ==========================================', 'zhangxin', '==========================================================')
-        lock_pull.release()
+        sess.run([self.pull_mean_op, self.pull_cov_op])
+        # lock_pull.acquire()
+        # self.pull_mean_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.mean_params, global_pop.mean_params)]
+        # self.pull_cov_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.cov_params, global_pop.cov_params)]
+        # sess.run([self.pull_mean_params_op, self.pull_cov_params_op])
+        # lock_pull.release()
 
     def getMaxfit(self):
+        # self.fit_val = (1 - self.bili) * self.fit_val + self.max_fit
         return self.max_fit
 
     def setMaxfit(self, fit):
+        # self.fit_val = (1 - self.bili) * self.fit_val + fit
         if fit > self.max_fit:
             self.max_fit = fit
+
+    def getFit_val(self):
+        return self.fit_val
+
+    def setFit_val(self, fit_list):
+        fit_list.sort(reverse=True)
+        len_val = math.floor(0.5 * len(fit_list))
+        fit_val = 0.0
+        for i in range(len_val):
+            fit_val = fit_val + 0.2 * fit_list[i] * math.exp(-(i/5))
+        # max_pop_fit = 0.0
+        # for i in fit_list:
+        #     if i > max_pop_fit:
+        #         max_pop_fit = i
+        self.fit_val = 0.2 * self.fit_val + 0.5 * fit_val
 
     def getDr(self):
         return self.dr
@@ -277,17 +342,17 @@ class Dataset(object):
 '''
 
 class Worker(object):
-    def __init__(self, name, data, numfea, classifier):
+    def __init__(self, name, data, numfea, classifier, global_pop):
         self.name = name
         self.data = data
         self.numfea = numfea
         self.classifier = classifier
-        self.popnet = Worker_pop(name, data)  # 每个线程在初始化中首先区初始化一个网络
+        self.popnet = Worker_pop(name, data, global_pop, 0.5)  # 每个线程在初始化中首先区初始化一个网络
 
     def numtofea(self, num, fea_list):
         feature = []
         for i in range(len(num)):
-            if num[i] == 1:
+            if num[i] == '1':
                 feature.append(fea_list[i])
             else:
                 continue
@@ -349,7 +414,7 @@ class Worker(object):
         # num = data.getDNA_size()
         count = 0
         for i in feature_list:
-            if (i == 1):
+            if (i == '1'):
                 count = count + 1
         return 1 - (count / self.numfea)
 
@@ -377,30 +442,19 @@ class Worker(object):
             kids_fit.append(i - max)
         return kids_fit
 
+    def save_to_file(self, file_name, contents):
+        fh = open(file_name, 'w')
+        fh.write(contents)
+        fh.close()
+
+    def save_to_afile(self, contents):
+        fh = open('E:/dataset/result.txt', 'a+')
+        fh.write(contents)
+        fh.close()
+
     def work(self):
         for g in range(MAX_GLOBAL_EP):
             print(self.name, g+1, '次迭代')
-            if g % 100 == 0 and g != 0:
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-
-                print(self.name, g+1, '当前网络为:', sess.run(self.popnet.mvn.mean()))
-                self.popnet._pull_net()
-                print(self.name, g+1, '获取目标网络为：', sess.run(self.popnet.mvn.mean()))
             # if g % 10 == 0 and g != 0:
             #     lock_max_fit.acquire()
             #     max_fit = global_pop.getMaxfit()
@@ -424,9 +478,9 @@ class Worker(object):
                 feature_list = []
                 for feature in kid:  # 遍历每个子代的每个特征
                     if feature > 0.5 * self.data.getbili():  # 对于特征值大于0.5的特征就用1表示
-                        feature_list.append(1)
+                        feature_list.append('1')
                     else:
-                        feature_list.append(0)  # 否则就用0来表示
+                        feature_list.append('0')  # 否则就用0来表示
                 feature_Select = self.numtofea(feature_list, self.data.getFeature())  # 将0，1串映射到特征的选取中
                 feature_set.append(feature_list)  # 将每个子代所选取的特征放到特征集合中
                 if self.data.getReadType() is 'split':
@@ -468,6 +522,10 @@ class Worker(object):
             lock_max_fit.acquire()
             max = self.popnet.getMaxfit()
             lock_max_fit.release()
+            self.popnet.setFit_val(kids_fits)
+            lock_Fit_val.acquire()
+            global_pop.setFit_val(self.popnet.getFit_val(), self.name, g)
+            lock_Fit_val.release()
             kids_fit = self.getKids_fit(kids_fits, max)
             sess.run(self.popnet.train_op,
                      {self.popnet.tfkids_fit: kids_fit, self.popnet.tfkids: kids})  # 然后根据所有子代的适应度来进行参数更新
@@ -476,42 +534,48 @@ class Worker(object):
             new_dr = self.dr_pre(feature_get)  # 然后更具特征选取来求出所对应的维度缩减率
             # if new_max > self.max_fit:
             #     self.max_fit = new_max
+            # str1 = '%s在第%d次时的fit%f' % (self.name, g, self.popnet.getFit_val()) + '\n'
+            # self.save_to_afile(str1)
             changed = self.insert_value(new_max, new_dr, 1)  # 将新得到的值一目前最大值进行比较
             if changed is True:
-                print('   ', self.name, '使用', 'knn', '第', g + 1, '轮迭代：')
-                print('选取特征为：', feature_get)
-                print('维度缩减为：', new_dr)
-                print('准确率为：', new_max)
+                info1 = '   %s使用knn第%d轮迭代' % (self.name, (g+1)) + '\n'
+                info2 = '选取特征为： ' + ' '.join(feature_get) + '\n'
+                info3 = '维度缩减为： %f' % new_dr + '\n'
+                info4 = '准确率为： %f' % new_max + '\n'
+                info = info1 + info2 + info3 + info4
+                self.save_to_afile(info)
+                print(info)
+                # print('   ', self.name, '使用', 'knn', '第', g + 1, '轮迭代：')
+                # print('选取特征为：', feature_get)
+                # print('维度缩减为：', new_dr)
+                # print('准确率为：', new_max)s
                 print(kids_fits)
                 self.popnet._update_net()
-                print(self.name, g+1, '更新全局网络为：', sess.run(self.popnet.mvn.mean()))
-            if g+1 % 100 == 0:
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-                print('pull ==========================================', 'zhangxin',
-                      '==========================================================')
-
-                print(self.name, g+1, '当前网络为:', sess.run(self.popnet.mvn.mean()))
+                info5 = ' '.join(str(i) for i in sess.run(self.popnet.mvn.mean())) + '\n'
+                info6 = '%s在第%d次迭代时更新全局网络为：' % (self.name, g+1)
+                self.save_to_afile(info6)
+                self.save_to_afile(info5)
+                print(self.name, g + 1, '更新全局网络为：', sess.run(self.popnet.mvn.mean()))
+            #     print(self.name, g+1, '更新全局网络为：', sess.run(self.popnet.mvn.mean()))
+            val = 1 / (1 + math.exp(-((g / 100) - 5.0)))
+            lock_is_choose.acquire()
+            is_choose = global_pop.is_choose(self.name)
+            lock_is_choose.release()
+            # if is_choose:
+            if random.random() < val and is_choose:
+            #     print(self.name, g+1, '当前网络为:', sess.run(self.popnet.mvn.mean()))
                 self.popnet._pull_net()
+                info7 = ' '.join(str(i) for i in sess.run(self.popnet.mvn.mean())) + '\n'
+                info8 = '%s在第%d次迭代时获取全局网络为：' % (self.name, g+1)
+                self.save_to_afile(info8)
+                self.save_to_afile(info7)
                 print(self.name, g+1, '获取目标网络为：', sess.run(self.popnet.mvn.mean()))
 
 
 if __name__ == '__main__':
     with tf.Graph().as_default(), tf.device('/cpu:0'):
-        N_WORKERS = 2    # 表示运行的线程个数
-        N_POP = 5    # 表示生成子代的个数
+        N_WORKERS = 6    # 表示运行的线程个数
+        N_POP = 50    # 表示生成子代的个数
 
         # 接着就是定义一些锁来对共享资源进行锁定
         lock_kids = threading.Lock()
@@ -519,9 +583,13 @@ if __name__ == '__main__':
         lock_dr = threading.Lock()
         lock_push = threading.Lock()
         lock_pull = threading.Lock()
+        lock_Fit_val = threading.Lock()
+        lock_is_choose = threading.Lock()
+        lock_global1 = threading.Lock()
+        lock_global2 = threading.Lock()
 
         LEARNING_RATE = 0.001    # 表示算法的学习率
-        MAX_GLOBAL_EP = 1000    # 表示算法的迭代次数
+        MAX_GLOBAL_EP = 301    # 表示算法的迭代次数
 
         # 定义分类器
         KNN = 'train_knn'
@@ -529,7 +597,7 @@ if __name__ == '__main__':
         TREE = 'tree'
 
         # 新建sess来运行算法
-        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.999)
+        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.8)
         sess = tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_placement=True, gpu_options=gpu_options))
 
         # 首先是将数据集特征的第一步过滤
@@ -539,14 +607,18 @@ if __name__ == '__main__':
         # 然后就是初始化全局网络
         global_pop = Global_pop('global', data)
 
+        fh = open('E:/dataset/result.txt', 'w')
+        fh.write('begin:\n')
+        fh.close()
+
         # 接着就是通过核心数来创建多线程进行工作
         with tf.device("/gpu:0"):
             workers = []
             for i in range(N_WORKERS):
-                with tf.device('/gpu:%d' % i):
-                    with tf.name_scope('GPU_%d' % i) as scope:
-                        i_name = 'W_%i' % i  # worker name
-                        workers.append(Worker(i_name, data, data.DNA, KNN))
+                with tf.device('/gpu:%d' % (i+1)):
+                    with tf.name_scope('GPU_%d' % (i+1)) as scope:
+                        i_name = 'W_%i' % (i+1)  # worker name
+                        workers.append(Worker(i_name, data, data.DNA, KNN, global_pop))
 
             COORD = tf.train.Coordinator()
             sess.run(tf.global_variables_initializer())
