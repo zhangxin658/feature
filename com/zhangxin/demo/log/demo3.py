@@ -17,6 +17,8 @@ from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.feature_selection import SelectKBest
 from minepy import MINE
 from sklearn.feature_selection import chi2
+from sklearn.feature_selection import SelectFromModel
+from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.feature_selection import f_classif
 from sklearn.feature_selection import mutual_info_classif
 from sklearn import neighbors
@@ -285,6 +287,7 @@ class Dataset(object):
     def __getData__(self):
         # self.train_selected = SelectKBest(lambda X, Y: np.array(map(lambda x: self.mic(x, Y), X.T)).T, k=self.select_feature).fit_transform(self.fea, self.lab)
         self.train_selected = SelectKBest(chi2, k=self.select_feature).fit_transform(self.fea, self.lab)
+        # self.train_selected = SelectFromModel(GradientBoostingClassifier()).fit_transform(self.fea, self.lab)
         self.x_train, self.x_test, self.y_train, self.y_test = train_test_split(self.train_selected, self.lab, test_size=self.test_size)
         if self.type == 'split':
             self.getMatDataBysplit(self.x_train, self.x_test, self.y_train, self.y_test)
@@ -383,7 +386,7 @@ class Worker(object):
     def get_fitness(self, data_train, label_train, data_pre, label_pre, train_cla):
         acc = 0.00
         if train_cla is 'train_knn':
-            clf = neighbors.KNeighborsClassifier(n_neighbors=1)  # 创建分类器对象
+            clf = neighbors.KNeighborsClassifier(n_neighbors=5)  # 创建分类器对象
             if len(data_train[0]) > 0:
                 clf.fit(data_train, label_train)  # 用训练数据拟合分类器模型搜索
                 predict = clf.predict(data_pre)
@@ -644,8 +647,8 @@ if __name__ == '__main__':
 
         # 首先是将数据集特征的第一步过滤
         Factor = 2
-        data = Dataset('E:/dataset/Vehicle', 'nfold')
-        data.__loadData__(1, ' ', 2, 500)
+        data = Dataset('E:/dataset/Vehicle', 'split')
+        data.__loadData__(1, ' ', 0.3, 500)
         data.__getData__()
         # 然后就是初始化全局网络
         global_pop = Global_pop('global', data)
@@ -661,7 +664,7 @@ if __name__ == '__main__':
                 with tf.device('/gpu:%d' % (i+1)):
                     with tf.name_scope('GPU_%d' % (i+1)) as scope:
                         i_name = 'W_%i' % (i+1)  # worker name
-                        workers.append(Worker(i_name, data, data.DNA, SVM, global_pop, Factor))
+                        workers.append(Worker(i_name, data, data.DNA, KNN, global_pop, Factor))
 
             COORD = tf.train.Coordinator()
             sess.run(tf.global_variables_initializer())
