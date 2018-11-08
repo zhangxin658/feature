@@ -1,0 +1,734 @@
+'''
+这里进行重构，完成交叉验证
+'''
+
+'''
+代码所需要的包
+'''
+import tensorflow as tf
+from tensorflow.contrib.distributions import MultivariateNormalFullCovariance
+import pandas as pd
+import numpy as np
+import threading
+import math
+import random
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
+from sklearn.feature_selection import SelectFromModel
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn import neighbors
+from sklearn import svm
+from sklearn.tree import DecisionTreeClassifier
+
+'''
+全局网络的构建
+'''
+
+
+class Global_pop(object):
+    def __init__(self, name, pops, pop, sub, sub_size):
+        """
+        这个类是用来定义全局网络的类
+        :param name: 用来表示所在种群全局网络的名称
+        :param pops: 用来表示所有的线程
+        :param pop: 用来表示所在的种群
+        :param sub: 用来表示所在的子集
+        :param sub_size: 用来表示所在种群的种群大小
+        """
+        with tf.variable_scope(name):
+            self.name = name
+            self.pops = pops
+            self.pop = pop
+            self.sub = sub
+            self.sub_size = sub_size
+            with tf.variable_scope('mean'):
+                self.mean = tf.Variable(tf.truncated_normal([self.sub_size, ], mean=0.0, stddev=0.05), dtype=tf.float32,
+                                        name=name + '_mean')
+            with tf.variable_scope('cov'):
+                self.cov = tf.Variable(0.5 * tf.eye(self.sub_size), dtype=tf.float32, name=name + '_cov')
+            self.mvn = MultivariateNormalFullCovariance(loc=self.mean, covariance_matrix=abs(self.cov))
+            self.mean_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=name + '/mean')
+            self.cov_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=name + '/cov')
+
+
+'''
+种群网络的构建
+'''
+
+
+class Worker_pop(object):
+    def __init__(self, name, pops, pop, sub, sub_size, global_pop, Factor=2):
+        """
+        这个类用来定义种群网络
+        :param name: 用来表示所在种群的名称
+        :param pops: 用来表示所有的线程
+        :param pop: 用来表示所在的种群
+        :param sub: 用来表示所在的子集
+        :param sub_size: 用来表示所在种群的大小
+        :param global_pop: 用来存储对应的全局网络
+        :param Factor: 用来表示所选取的offset用于更新网络的个数因子
+        """
+        with tf.variable_scope(name):
+            self.name = name
+            self.pops = pops
+            self.pop = pop
+            self.sub = sub
+            self.sub_size = sub_size
+            self.N_POP_size = N_POP
+            self.C_POP_size = math.floor(N_POP / Factor)
+            with tf.variable_scope('mean'):
+                self.mean = tf.Variable(tf.truncated_normal([self.sub_size, ], mean=0.0, stddev=0.01), dtype=tf.float32,
+                                        name=name + '_mean')
+            with tf.variable_scope('cov'):
+                self.cov = tf.Variable(1.0 * tf.eye(self.sub_size), dtype=tf.float32, name=name + '_cov')
+            self.mvn = MultivariateNormalFullCovariance(loc=self.mean, covariance_matrix=abs(self.cov))
+            self.make_kid = self.mvn.sample(self.N_POP_size)
+            self.tfkids_fit = tf.placeholder(tf.float32, [self.C_POP_size, ])
+            self.tfkids = tf.placeholder(tf.float32, [self.C_POP_size, self.sub_size])
+            self.loss = -tf.reduce_mean(self.mvn.log_prob(self.tfkids) * self.tfkids_fit)
+            self.train_op = tf.train.AdamOptimizer().minimize(self.loss)
+            self.mean_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=name + '/mean')
+            self.cov_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=name + '/cov')
+
+            with tf.name_scope('pull'):
+                self.pull_mean_op = self.mean.assign(global_pop.mean)
+                self.pull_cov_op = self.cov.assign(global_pop.cov)
+            with tf.name_scope('push'):
+                self.push_mean_op = global_pop.mean.assign(self.mean)
+                self.push_cov_op = global_pop.cov.assign(self.cov)
+            with tf.name_scope('restart'):
+                self.re_mean_op = self.mean.assign(
+                    tf.Variable(tf.truncated_normal([self.sub_size, ], mean=0.0, stddev=0.01), dtype=tf.float32))
+                self.re_cov_op = self.cov.assign(tf.Variable(1.0 * tf.eye(self.sub_size), dtype=tf.float32))
+
+    def _update_net(self):
+        sess.run([self.push_mean_op, self.push_cov_op])
+
+    def _pull_net(self):
+        sess.run([self.pull_mean_op, self.pull_cov_op])
+
+    def _restart_net(self):
+        sess.run([self.re_mean_op, self.re_cov_op])
+
+
+'''
+数据预处理的类
+'''
+
+
+class Dataset(object):
+    def __init__(self, file, type):
+        """
+        这是一个数据预处理的类。封装了对于数据集的预处理操作
+        :param filename: 数据集的名称，不包含文件名后缀
+        :param type: 数据集的类型
+        """
+        self.file = file
+        self.filename = file + '.txt'
+        self.type = type
+        self.DNA = 0
+        self.len = 0
+        self.DNA_size = 0
+        self.Feature = []
+        self.trainX = []
+        self.trainy = []
+        self.testX = []
+        self.testy = []
+
+    def __loadData__(self, label_loc, div_mode, test_size):
+        """
+        这是表示对数据集加载的操作，通过传入的文件格式以及参数
+        :param label_loc: 表示标签的位置，在前为0，在后为1；
+        :param div_mode: 表示数据分割的方式，有','和' ';
+        :param test_size: 表示数据集划分的方式，有0.3（表示随机划分），2（2折验证），10（10折验证）
+        :return:
+        """
+        self.label_loc = label_loc
+        self.div_mode = div_mode
+        self.test_size = test_size
+        f = open(self.filename)
+        self.numData = len(f.readline().split(self.div_mode))
+        f.close()
+        self.__pretreatment__()
+        if self.label_loc == 0:
+            data = pd.read_table(self.filenamed, sep=' ')
+            self.fea, self.lab = np.array(data.ix[:, 1:]), np.array(data.ix[:, 0])
+        elif self.label_loc == 1:
+            data = pd.read_table(self.filenamed, sep=' ')
+            self.fea, self.lab = np.array(data.ix[:, 0:self.numData - 1]), np.array(data.ix[:, -1])
+        self.DNA = len(self.fea[0])
+        self.len = len(self.fea)
+
+    def __pretreatment__(self):
+        """
+        此方法表示为每个数据集添加一行的操作，因为pandas读取数据时会忽略第一行数据
+        :return:
+        """
+        v = []
+        val = []
+        for i in range(self.numData):
+            v.append(i)
+        val.append(v)
+        fr = open(self.filename)
+        for line in fr.readlines():
+            xi = []
+            curline = line.strip().split(self.div_mode)
+            for i in range(self.numData):
+                xi.append((curline[i]))
+            val.append(xi)
+            self.filenamed = self.file + 'ed' + '.txt'
+        fr.close()
+        self.saveData(self.filenamed, np.array(val))
+
+    def saveData(self, filename, dataname):
+        '''
+        这是用于存储数据的方法
+        :param filename: 要存储的文件名
+        :param dataname: 要存储的目标文件
+        :return:
+        '''
+        with open(filename, 'w') as file_object:  # 将文件及其内容存储到变量file_object
+            # 写入第一行(第一块)
+            file_object.write(str(dataname[0, 0]))  # 写第一行第一列
+            for j in range(1, np.size(dataname, 1)):
+                file_object.write(' ' + str(dataname[0, j]))  # 写第一列后面的列
+
+            # 写入第一行后面的行（第二块）
+            for i in range(1, np.size(dataname, 0)):
+                file_object.write('\n' + str(dataname[i, 0]))
+                for j in range(1, np.size(dataname, 1)):
+                    file_object.write(' ' + str(dataname[i, j]))
+
+    def __getData__(self):
+        '''
+        这是用于过滤特征并将数据进行划分的方法
+        :return:
+        '''
+        if self.DNA > Max_fea_num:
+            self.fea = SelectFromModel(GradientBoostingClassifier()).fit_transform(self.fea, self.lab)
+        if self.type == 'split':
+            self.x_train, self.x_test, self.y_train, self.y_test = train_test_split(self.fea, self.lab,
+                                                                                    test_size=self.test_size)
+            self.getMatDataBysplit(self.x_train, self.x_test, self.y_train, self.y_test)
+        elif self.type == 'nfold':
+            skf = StratifiedKFold(n_splits=self.test_size, shuffle=True)
+            skf.get_n_splits(self.fea, self.lab)
+            self.getMatDataBynfold(skf, self.fea, self.lab)
+
+    # 将列表形式的数据转换为矩阵形式
+    def getMatDataBysplit(self, x_train, x_test, y_train, y_test):
+        '''
+        这是用于将数据按矩阵形式存储的方法，此方法中的数据是将数据集按照随机划分得到的
+        :param x_train:
+        :param x_test:
+        :param y_train:
+        :param y_test:
+        :return:
+        '''
+        self.trainX.append(x_train)
+        self.testX.append(x_test)
+        self.trainy.append(y_train)
+        self.testy.append(y_test)
+        self.DNA_size = len(x_train[0])
+        for i in range(self.DNA_size):
+            self.Feature.append(i)  # 其中的元素是特征所在的位置
+
+    def getMatDataBynfold(self, skf, feature, label):
+        '''
+        这是用于将数据按矩阵形式存储的方法，此方法中的数据是将数据集按照n_fold划分得到的
+        :param skf:
+        :param feature:
+        :param label:
+        :return:
+        '''
+        for train_index, test_index in skf.split(feature, label):
+            trainX_ = feature[train_index]
+            trainy_ = label[train_index]
+            testX_ = feature[test_index]
+            testy_ = label[test_index]
+            self.trainX.append(trainX_)
+            self.testX.append(testX_)
+            self.trainy.append(trainy_)
+            self.testy.append(testy_)
+        self.DNA_size = len(feature[0])
+        for i in range(self.DNA_size):
+            self.Feature.append(i)
+
+    def getDNA_size(self):
+        return self.DNA_size
+
+    def getdata(self):
+        return self.trainX, self.testX, self.trainy, self.testy
+
+    def getFeature(self):
+        return self.Feature
+
+    def getReadType(self):
+        return self.type
+
+    def getTestsize(self):
+        return self.test_size
+
+'''
+然后就是对每个线程工作内容的定义
+'''
+class Worker(object):
+
+    def __init__(self, name, pop, sub, step, data, classifier, factor, block):
+        '''
+        这里定义线程工作的类，包括各种方法
+        :param name: 线程的名称
+        :param pop: 表示当前的线程所在的种群
+        :param sub: 表示当前的线程所在的种群子集
+        :param step: 表示每组的步长
+        :param data: 表示预处理过的数据集
+        :param classifier: 表示所所使用的分类器
+        :param factor: 表示折扣因子，用来说明所选的offset的个数
+        :param block: 表示种群子集的大小
+        '''
+        self.name = name
+        self.my_max_fea = []
+        self.my_max_fit = 0
+        self.my_feature_Selected = []
+        self.mean_fit = 0.0
+        self.pop = pop
+        self.sub = sub
+        self.fea = feas[self.pop]
+        self.step = step
+        self.data = data
+        self.DNA_size = data.getDNA_size()
+        self.sub_size = len(pops[pop][sub])
+        self.classifier = classifier
+        self.factor = factor
+        self.Block = block
+        self.ind = 0
+        self.fitness = 0.0
+        self.global_pop = Global_pop(name, pops, pop, sub, self.sub_size)
+        self.popnet = Worker_pop(name, pops, pop, sub, self.sub_size, self.global_pop, self.factor)  # 每个线程在初始化中首先区初始化一个网络
+
+    def numtofea(self, list):
+        feature1 = []
+        feature2 = []
+        feature3 = []
+        feature4 = []
+        my_fea1 = max_feas[self.pop][0].copy()
+        my_fea2 = max_feas[self.pop][1].copy()
+        my_fea3 = max_feas[self.pop][2].copy()
+        my_fea4 = max_feas[self.pop][3].copy()
+        # 首先是将sub中所选的特征映射到全局的特征选择中
+        l = self.step * self.sub
+        for i in range(self.sub_size):
+            if list[i] == 1:
+                my_fea1[l + i] = 1
+                my_fea2[l + i] = 1
+                my_fea3[l + i] = 1
+                my_fea4[l + i] = 1
+            else:
+                my_fea1[l + i] = 0
+                my_fea2[l + i] = 0
+                my_fea3[l + i] = 0
+                my_fea4[l + i] = 0
+        # 然后是根据全局中所选的特征到全局
+        for i in range(self.DNA_size):
+            if my_fea1[i] == 1:
+                feature1.append(feas[self.pop][i])
+            if my_fea2[i] == 1:
+                feature2.append(feas[self.pop][i])
+            if my_fea3[i] == 1:
+                feature3.append(feas[self.pop][i])
+            if my_fea4[i] == 1:
+                feature4.append(feas[self.pop][i])
+        return feature1, feature2, feature3, feature4, my_fea1, my_fea2, my_fea3, my_fea4
+
+    def getData(self):
+        trainX_, testX_, trainy_, testy_ = self.data.getdata()
+        trainX = trainX_[0]
+        testX = testX_[0]
+        trainy = trainy_[0]
+        testy = testy_[0]
+        return trainX, testX, trainy, testy
+
+    def read_data_fea(self, fea_list, dataset):
+        dataMat = np.mat(np.array(dataset))
+        cul = dataMat.shape[0]  # 行号
+        data_sample = []
+        for i in range(cul):
+            cul_i = []
+            for j in fea_list:
+                cul_i.append(dataMat[i, j])
+            data_sample.append(cul_i)
+        return data_sample
+
+    def get_fitness(self, data_train, label_train, data_pre, label_pre, train_cla):
+        acc = 0.00
+        if train_cla is 'train_knn':
+            clf = neighbors.KNeighborsClassifier(n_neighbors=N_knn)  # 创建分类器对象
+            if len(data_train[0]) > 0:
+                clf.fit(data_train, label_train)  # 用训练数据拟合分类器模型搜索
+                predict = clf.predict(data_pre)
+                acc = accuracy_score(label_pre, predict)
+        elif train_cla is 'svm':
+            clf = svm.SVC()
+            if len(data_train[0]) > 0:
+                clf.fit(data_train, label_train)
+                predict = clf.predict(data_pre)
+                acc = accuracy_score(label_pre, predict)
+        elif train_cla is 'tree':
+            if len(data_train[0]) > 0:
+                clf = DecisionTreeClassifier()
+                clf.fit(data_train, label_train)
+                predict = clf.predict(data_pre)
+                acc = accuracy_score(label_pre, predict)
+        return acc
+
+    def getKids_fit(self, kids_fits, kids, factor):
+        kids_fit = []
+        kid = []
+        val = kids_fits.copy()
+        for i in range(math.floor(N_POP / factor)):
+            ind = 0
+            pos = 0.0
+            for j in range(i, len(val)):
+                if val[j] > pos:
+                    pos = val[j]
+                    ind = j
+            val[i], val[ind] = val[ind], val[i]
+            kids[i], kids[ind] = kids[ind], kids[i]
+            val[i] = -1.0
+            kid.append(kids[i])
+            kids_fit.append(pos - self.mean_fit)
+        Max_fit = kids_fit[0] + self.mean_fit
+        val = np.mean(kids_fits)
+        # pop_max_fit = max_fits[self.pop][2]
+        # self.fitness = (1-delte) * self.fitness + delte * np.mean(pop_max_fit)
+        # self.fitness = (1 - delte) * self.fitness + delte * (val - self.mean_fit)
+        self.mean_fit = val
+        # Global_max_fit[self.pop * Block + self.sub] = self.fitness
+        return kids_fit, kid, Max_fit
+
+    def is_better_self(self, kid_fit, g, my_fea, feature_Selected):
+        if kid_fit > self.my_max_fit:
+            self.my_max_fit = kid_fit
+            self.my_max_fea = my_fea
+            self.my_feature_Selected = feature_Selected
+            print(self.name, ' 第', g, '轮sub进行更新，为；', kid_fit)
+            return True
+
+    def is_better_sub(self, g):
+        if self.my_max_fit > max_fits[self.pop][2]:
+            max_fits[self.pop][0], max_fits[self.pop][1] = max_fits[self.pop][1], max_fits[self.pop][2]
+            max_feas[self.pop][0], max_feas[self.pop][1] = max_feas[self.pop][1], max_feas[self.pop][2]
+            max_fits[self.pop][2] = self.my_max_fit
+            max_feas[self.pop][2] = self.my_max_fea.copy()
+        elif max_fits[self.pop][1] < self.my_max_fit < max_fits[self.pop][2]:
+            max_fits[self.pop][0] = max_fits[self.pop][1]
+            max_feas[self.pop][0] = max_feas[self.pop][1]
+            max_fits[self.pop][1] = self.my_max_fit
+            max_feas[self.pop][1] = self.my_max_fea.copy()
+        elif max_fits[self.pop][0] < self.my_max_fit < max_fits[self.pop][1]:
+            max_fits[self.pop][0] = self.my_max_fit
+            max_feas[self.pop][0] = self.my_max_fea.copy()
+        print(self.name, g, '更新pop种群分布')
+        print(self.name, g, '种群pop最大值为：', max_fits[self.pop])
+
+    def is_better_pop(self, fit, fea):
+        global Global_fit, Global_red, Global_fea
+        self_red = 1 - (len(fea)/data.DNA)
+        if fit > Global_fit:
+            Global_fit = fit
+            Global_red = self_red
+            Global_fea = fea.copy()
+            print('此时全局最大值为：', Global_fit)
+            print('全局维度缩减为： ', self_red, '  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+        elif fit == Global_fit and self_red > Global_red:
+            Global_red = self_red
+            Global_fea = fea.copy()
+            print('此时全局最大值为：', Global_fit)
+            print('全局维度缩减为： ', self_red, '  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+
+    def could_reset_pop(self, g):
+        n = g - mut[0]
+        res = 0.001 + 0.999 * ((math.exp(10 * (n / numset)) - 1) / (math.exp(10) - 1))
+        val = []
+        val.append(max_fits[0][2])
+        val.append(max_fits[1][2])
+        val.append(max_fits[2][2])
+        val.sort()
+        return random.random() < res and val[0] == max_fits[self.pop][2]
+
+    def reset_pop(self, g):
+        mut[0] = g
+        l = []
+        val = Global_fea.copy()
+        for i in range(self.DNA_size):
+            l.append(0)
+        max_feas[self.pop][0] = l.copy()
+        for i in val:
+            max_feas[self.pop][0][self.fea.index(i)] = 1
+        print(self.name, g, '===============================重启网络============================')
+
+    def get_large_fit(self, kid_fit1, kid_fit2, kid_fit3, kid_fit4, my_fea1, my_fea2, my_fea3, my_fea4, feature_Selected1, feature_Selected2, feature_Selected3, feature_Selected4):
+        if kid_fit4 > kid_fit1:
+            kid_fit1 = kid_fit4
+            my_fea1 = my_fea4.copy()
+            feature_Selected1 = feature_Selected4.copy()
+        if kid_fit1 > kid_fit2:
+            if kid_fit3 > kid_fit1:
+                return kid_fit3, my_fea3, feature_Selected3
+            else:
+                return kid_fit1, my_fea1, feature_Selected1
+        else:
+            if kid_fit3 > kid_fit2:
+                return kid_fit3, my_fea3, feature_Selected3
+            else:
+                return kid_fit2, my_fea2, feature_Selected2
+
+    def get_large_mean_fit(self, kid_fit1, kid_fit2, kid_fit3, kid_fit4):
+        if np.mean(kid_fit4) > np.mean(kid_fit1):
+            kid_fit1 = kid_fit4.copy()
+        if np.mean(kid_fit1) > np.mean(kid_fit2):
+            if np.mean(kid_fit3) > np.mean(kid_fit1):
+                return kid_fit3
+            else:
+                return kid_fit1
+        else:
+            if np.mean(kid_fit3) > np.mean(kid_fit2):
+                return kid_fit3
+            else:
+                return kid_fit2
+
+    def get_kids_fits(self, kid_fit1s, kid_fit2s, kid_fit3s):
+        val1 = np.mean(kid_fit1s)
+        val2 = np.mean(kid_fit2s)
+        val3 = np.mean(kid_fit3s)
+        if val3 > val2 and val3 > val1:
+            return kid_fit3s
+        elif val2 > val1:
+            return kid_fit2s
+        else:
+            return kid_fit1s
+
+    def get_fea_list(self, kid):
+        list = []
+        for feature in kid:  # 遍历每个子代的每个特征
+            if 1/(1 + math.exp(-feature * 2.5)) > 0.66:
+                list.append(1)
+            else:
+                list.append(0)  # 否则就用0来表示
+        return list
+
+    def set_random_list(self, g):
+        if g > node[0]:
+            node[0] = g
+            list_max_fit.append(Global_fit)
+            list_max_red.append(Global_red)
+        for i in range(self.DNA_size):
+            if random.random() >= Global_red:
+                max_feas[self.pop][3].append(1)
+            else:
+                max_feas[self.pop][3].append(0)
+
+    def get_fit_split(self, feature_Selected1, feature_Selected2, feature_Selected3, feature_Selected4):
+        trainX, testX, trainy, testy = self.getData()
+        data_sample1 = self.read_data_fea(feature_Selected1, trainX)
+        data_predict1 = self.read_data_fea(feature_Selected1, testX)  # 找到所选特征所对应的数据集
+        data_sample2 = self.read_data_fea(feature_Selected2, trainX)
+        data_predict2 = self.read_data_fea(feature_Selected2, testX)  # 找到所选特征所对应的数据集
+        data_sample3 = self.read_data_fea(feature_Selected3, trainX)
+        data_predict3 = self.read_data_fea(feature_Selected3, testX)  # 找到所选特征所对应的数据集
+        data_sample4 = self.read_data_fea(feature_Selected4, trainX)
+        data_predict4 = self.read_data_fea(feature_Selected4, testX)  # 找到所选特征所对应的数据集
+
+        kid_fit1 = self.get_fitness(data_sample1, trainy, data_predict1, testy,
+                                    self.classifier)  # 然后更具所选的特征集合进行准确率求解
+        kid_fit2 = self.get_fitness(data_sample2, trainy, data_predict2, testy,
+                                    self.classifier)  # 然后更具所选的特征集合进行准确率求解
+        kid_fit3 = self.get_fitness(data_sample3, trainy, data_predict3, testy,
+                                    self.classifier)  # 然后更具所选的特征集合进行准确率求解
+        kid_fit4 = self.get_fitness(data_sample4, trainy, data_predict4, testy,
+                                    self.classifier)  # 然后更具所选的特征集合进行准确率求解
+        return kid_fit1, kid_fit2, kid_fit3, kid_fit4
+
+    def get_fit_nflod(self, feature_Selected1, feature_Selected2, feature_Selected3, feature_Selected4):
+        kid_fit1 = 0.0
+        kid_fit2 = 0.0
+        kid_fit3 = 0.0
+        kid_fit4 = 0.0
+        nsize = self.data.getTestsize()
+        for i in range(nsize):
+            trainX_, testX_, trainy_, testy_ = self.data.getdata()
+            trainX = trainX_[i]
+            testX = testX_[i]
+            trainy = trainy_[i]
+            testy = testy_[i]
+            data_sample1 = self.read_data_fea(feature_Selected1, trainX)
+            data_predict1 = self.read_data_fea(feature_Selected1, testX)  # 找到所选特征所对应的数据集
+            data_sample2 = self.read_data_fea(feature_Selected2, trainX)
+            data_predict2 = self.read_data_fea(feature_Selected2, testX)  # 找到所选特征所对应的数据集
+            data_sample3 = self.read_data_fea(feature_Selected3, trainX)
+            data_predict3 = self.read_data_fea(feature_Selected3, testX)  # 找到所选特征所对应的数据集
+            data_sample4 = self.read_data_fea(feature_Selected4, trainX)
+            data_predict4 = self.read_data_fea(feature_Selected4, testX)  # 找到所选特征所对应的数据集
+            kid_fit_sample1 = self.get_fitness(data_sample1, trainy, data_predict1, testy,
+                                        self.classifier)  # 然后更具所选的特征集合进行准确率求解
+            kid_fit_sample2 = self.get_fitness(data_sample2, trainy, data_predict2, testy,
+                                        self.classifier)  # 然后更具所选的特征集合进行准确率求解
+            kid_fit_sample3 = self.get_fitness(data_sample3, trainy, data_predict3, testy,
+                                        self.classifier)  # 然后更具所选的特征集合进行准确率求解
+            kid_fit_sample4 = self.get_fitness(data_sample4, trainy, data_predict4, testy,
+                                               self.classifier)  # 然后更具所选的特征集合进行准确率求解
+            kid_fit1 = kid_fit1 + kid_fit_sample1
+            kid_fit2 = kid_fit2 + kid_fit_sample2
+            kid_fit3 = kid_fit3 + kid_fit_sample3
+            kid_fit4 = kid_fit4 + kid_fit_sample4
+        return kid_fit1/nsize, kid_fit2/nsize, kid_fit3/nsize, kid_fit4/nsize
+
+    def work(self):
+        for g in range(MAX_GLOBAL_EP):
+            print(self.name, ' 第', g + 1, '次迭代开始:')
+            kids = sess.run(self.popnet.make_kid)
+            kids_fits1 = []
+            kids_fits2 = []
+            kids_fits3 = []
+            kids_fits4 = []
+            for kid in kids:  # 遍历每一个子代
+                feature_list = self.get_fea_list(kid)
+                feature_Selected1, feature_Selected2, feature_Selected3, feature_Selected4, my_fea1, my_fea2, my_fea3, my_fea4 = self.numtofea(
+                    feature_list)
+                if self.data.getReadType() is 'split':
+                    kid_fit1, kid_fit2, kid_fit3, kid_fit4 = self.get_fit_split(feature_Selected1, feature_Selected2,
+                                                                      feature_Selected3, feature_Selected4)
+                else:
+                    kid_fit1, kid_fit2, kid_fit3, kid_fit4 = self.get_fit_nflod(feature_Selected1, feature_Selected2,
+                                                                      feature_Selected3, feature_Selected4)
+                kids_fits1.append(kid_fit1)
+                kids_fits2.append(kid_fit2)
+                kids_fits3.append(kid_fit3)
+                kids_fits4.append(kid_fit4)
+                kid_fit, my_fea, feature_Selected = self.get_large_fit(kid_fit1, kid_fit2, kid_fit3, kid_fit4, my_fea1, my_fea2, my_fea3, my_fea4, feature_Selected1, feature_Selected2, feature_Selected3, feature_Selected4)
+                self.is_better_self(kid_fit, g+1, my_fea, feature_Selected)
+            kids_fits = self.get_large_mean_fit(kids_fits1, kids_fits2, kids_fits3, kids_fits4)
+            kids_fit, kid, Max_fit = self.getKids_fit(kids_fits, kids, self.factor)
+            sess.run(self.popnet.train_op,
+                     {self.popnet.tfkids_fit: kids_fit, self.popnet.tfkids: kid})
+            self.is_better_sub(g+1)
+            self.is_better_pop(self.my_max_fit, self.my_feature_Selected)
+            if self.could_reset_pop(g+1):
+                self.reset_pop(g+1)
+            self.set_random_list(g + 1)
+
+
+'''
+定义主过程函数，定义迭代次数，以及相关的参数
+'''
+if __name__ == '__main__':
+    with tf.Graph().as_default(), tf.device('/cpu:0'):
+
+        N_WORKERS = 6  # 表示运行的线程个数
+        N_POP = 36  # 表示生成子代的个数
+        Block = 3
+        Max_fea_num = 10000
+        LEARNING_RATE = 0.001  # 表示算法的学习率
+        MAX_GLOBAL_EP = 30  # 表示算法的迭代次数
+
+        # 定义分类器
+        KNN = 'train_knn'
+        SVM = 'svm'
+        TREE = 'tree'
+
+        # 定义数据集划分方式
+        SPLIT = 'split'
+        NFOLD = 'nfold'
+
+        # 定义会话
+        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.9)
+        sess = tf.Session(
+            config=tf.ConfigProto(allow_soft_placement=True, log_device_placement=True, gpu_options=gpu_options))
+        sess.run(tf.global_variables_initializer())  # initialize tf variables
+
+        # 首先是进行数据集特征的第一步过滤
+        Factor = 1
+        delte = 0.7
+        numset = 10
+        N_knn = 5
+        data = Dataset('E:/dataset/glass', NFOLD)
+        data.__loadData__(1, ',', 2)
+        data.__getData__()
+
+        # 然后就是将数据及按照子集形式进行划分
+        fea1 = data.getFeature()  # 表示数据集所对应的特征
+        size = data.getDNA_size()  # 表示数据集的大小
+        global Global_fit, Global_red, Global_fea
+        Global_fit = 0.0
+        Global_red = 0.0
+        Global_fea = []
+        node = []          #用来辅助每次迭代记录
+        node.append(0)
+        list_max_fit = []
+        list_max_red = []
+        Global_max_fit = []
+        pops = []
+        feas = []
+        mut = []     #用来记录重启时机
+        mut.append(1)
+        max_feas = []
+        max_fits = []
+        step = math.ceil(size / Block)  # 表示每个子集的大小
+        for p in range(N_WORKERS):
+            fea = []
+            random.shuffle(fea1)  # 随机打乱数据集
+            for i in fea1:
+                fea.append(i)
+            max_fea1 = []
+            max_fea2 = []
+            max_fea3 = []
+            ran_fea4 = []
+            for i in range(size):
+                max_fea1.append(0)
+                max_fea2.append(0)
+                max_fea3.append(0)
+                ran_fea4.append(0)
+            sub = [fea[i:i + step] for i in range(0, size, step)]
+            pops.append(sub)
+            feas.append(fea)
+            fea_set = []
+            fea_set.append(max_fea1)
+            fea_set.append(max_fea2)
+            fea_set.append(max_fea3)
+            fea_set.append(ran_fea4)
+            max_feas.append(fea_set)
+            fit1 = [0.0]
+            fit2 = [0.0]
+            fit3 = [0.0]
+            fit_set = []
+            fit_set.append(fit1)
+            fit_set.append(fit2)
+            fit_set.append(fit3)
+            max_fits.append(fit_set)
+
+        # 接着就是通过核心数来创建多线程进行工作
+        with tf.device('/cpu:0'):
+            workers = []
+            i = 0
+            for pop in range(N_WORKERS):
+                for sub in range(Block):
+                    with tf.device('/gpu:%d' % i):
+                        i += 1
+                        with tf.name_scope('sub_%d' % (sub + 1)) as scope:
+                            i_name = 'sub_%d_of_pop_%d' % ((sub + 1), (pop + 1))
+                            Global_max_fit.append(0.0)
+                            workers.append(Worker(i_name, pop, sub, step, data, SVM, Factor, Block))
+
+            COORD = tf.train.Coordinator()
+            sess.run(tf.global_variables_initializer())
+
+            print('****************************  开始运行，数据集大小为：', data.getDNA_size(), '  ****************************')
+            worker_threads = []
+            for worker in workers:
+                job = lambda: worker.work()
+                t = threading.Thread(target=job)
+                t.start()
+                worker_threads.append(t)
+            COORD.join(worker_threads)
