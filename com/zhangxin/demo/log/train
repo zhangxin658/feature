@@ -475,6 +475,7 @@ class Worker(object):
     def reset_pop(self, g):
         mut[0] = g
         l = []
+        self.popnet._restart_net()
         val = Global_fea.copy()
         for i in range(self.DNA_size):
             l.append(0)
@@ -643,7 +644,7 @@ if __name__ == '__main__':
         N_WORKERS = 6  # 表示运行的线程个数
         N_POP = 36  # 表示生成子代的个数
         Block = 10
-        mean = -0.10
+        mean = -0.50
         Max_fea_num = 100001
         LEARNING_RATE = 0.01  # 表示算法的学习率
         MAX_GLOBAL_EP = 60  # 表示算法的迭代次数
